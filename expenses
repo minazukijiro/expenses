@@ -41,7 +41,7 @@ expenses() {
             --) shift; break ;;
             -D) shift; id="$1" delete=1 ;;
             -c) shift; cid="$1" ;;
-            -d) shift; date=$(date -d "$1" '+%Y-%m-%dT%H:%M:%S') ;;
+            -d) shift; date=$(datetime "$1") ;;
             -e)                expense=1 ;;
             -i) shift; id="$1" update=1 ;;
         esac
@@ -69,14 +69,14 @@ expenses() {
     [[ -n "$cid" ]] && has_category "$cid"
     [[ ! "$amount" =~ ^-?[0-9]+$ ]] && die "$amount: is not number"
 
-    local q="INSERT INTO expenses VALUES ('$id', '$date', '$cid', $amount)"
-    q="$q ON CONFLICT(id) DO UPDATE SET date = '$date', cid = '$cid', amount = $amount"
+    local q="INSERT INTO expenses VALUES ('$id', datetime('$date'), '$cid', $amount)"
+    q="$q ON CONFLICT(id) DO UPDATE SET date = datetime('$date'), cid = '$cid', amount = $amount"
     sql <<< "$q"
     summary "$id"
 }
 
 export_() {
-    local n=4 fmt='%s[%s\t%s\t%d]\n' q="SELECT e.id, strftime('%Y-%m-%d', date), c.name, amount FROM expenses AS e"
+    local n=4 fmt='%s[%s\t%s\t%d]\n' q="SELECT e.id, strftime('%Y-%m-%d', date, 'localtime'), c.name, amount FROM expenses AS e"
     q="$q LEFT JOIN category AS c ON e.cid = c.id ORDER BY date"
 
     case "$1" in
@@ -92,7 +92,7 @@ summary() {
     local args=$(getopt -o abeid: -- "$@")
     eval set -- "$args"
 
-    local balance=0 expense=0 income=0 day=-1
+    local balance=0 expense=0 income=0
     while (( $# )); do
         case "$1" in
             --) shift; break ;;
@@ -100,33 +100,52 @@ summary() {
             -b) balance=1 ;;
             -e) expense=1 ;;
             -i) income=1 ;;
-            -d) shift; day="$1" ;;
         esac
         shift
     done
 
-    [[ ! "$day" =~ ^-?[0-9]+$ ]] && die "$day: is not number"
-
-    local q="SELECT e.id, strftime('%Y-%m-%d', date) AS date, c.name AS category, amount FROM expenses AS e"
-    q="$q LEFT JOIN category AS c ON e.cid = c.id"
+    local filter
     if (( $# )); then
-        q="$q WHERE e.id = '$1'"
+        local datetime=$(datetime "$1")
+        filter="date >= datetime('$datetime')"
+        if [[ -n "$2" ]]; then
+            datetime=$(datetime "$2")
+            filter="$filter AND date <= datetime('$datetime')"
+        fi
     fi
 
     local sqlargs=(-cmd '.headers on' -cmd '.mode column')
 
-    sql "${sqlargs[@]}" <<< "SELECT * FROM ($q ORDER BY date DESC LIMIT $day) ORDER BY date ASC"; echo
+    local q="SELECT e.id, strftime('%Y-%m-%d', date, 'localtime') AS date, c.name AS category, amount FROM expenses AS e"
+    q="$q LEFT JOIN category AS c ON e.cid = c.id"
+    [[ -n "$filter" ]] && q="$q WHERE $filter"
+    sql "${sqlargs[@]}" <<< "$q ORDER BY date ASC"; echo
 
     if (( $expense )); then
-        sql "${sqlargs[@]}" <<< "SELECT SUM(amount) AS expense FROM expenses WHERE amount < 0"; echo
+        q="SELECT SUM(amount) AS expense FROM expenses WHERE amount < 0"
+        [[ -n "$filter" ]] && q="$q AND $filter"
+        sql "${sqlargs[@]}" <<< "$q"; echo
     fi
 
     if (( $income )); then
-        sql "${sqlargs[@]}" <<< "SELECT SUM(amount) AS income FROM expenses WHERE amount > 0"; echo
+        q="SELECT SUM(amount) AS income FROM expenses WHERE amount > 0"
+        [[ -n "$filter" ]] && q="$q AND $filter"
+        sql "${sqlargs[@]}" <<< "$q"; echo
     fi
 
     if (( $balance )); then
-        sql "${sqlargs[@]}" <<< "SELECT SUM(amount) AS balance FROM expenses"; echo
+        q="SELECT SUM(amount) AS balance FROM expenses"
+        [[ -n "$filter" ]] && q="$q WHERE $filter"
+        sql "${sqlargs[@]}" <<< "$q"; echo
+    fi
+}
+
+datetime() {
+    local fmt='+%Y-%m-%d %H:%M:%S'
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+        date -u -d "@$1" "$fmt"
+    else
+        date -u -d "$1 JST" "$fmt"
     fi
 }
 

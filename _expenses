@@ -35,8 +35,8 @@ _expenses() {
                     ;;
                 income)
                     _arguments \
-                        '(- *)-D[delete record]: :__expenses_expense_ids' \
-                        '(-D)-i[exit record]: :__expenses_expense_ids' \
+                        '(- *)-D[delete record]: :__expenses_income_ids' \
+                        '(-D)-i[exit record]: :__expenses_income_ids' \
                         '(-D)-c[category id]: :__expenses_category_ids' \
                         '(-D)-d[date YYYY-mm-dd\[ HH:MM:SS\]]: :__expenses_date'
                     ;;
