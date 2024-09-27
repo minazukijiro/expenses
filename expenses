@@ -1,157 +1,160 @@
-#!/usr/bin/env bash
-
-category() {
-    local args=$(getopt -o D:i: -- "$@")
-    eval set -- "$args"
-
-    local delete=0 id=$(idgen) name
-    while (( $# )); do
-        case "$1" in
-            --) shift; break ;;
-            -D) shift; id="$1" delete=1 ;;
-            -i) shift; id="$1" ;;
-        esac
-        shift
-    done
-
-    if (( $delete )); then
-        has_category "$id"
-        sql <<< "DELETE FROM category WHERE id = '$id'"
-    elif (( $# )); then
-        name="$1"
-        [[ -z "$name" ]] && die "name is required"
-        sql <<< "INSERT INTO category VALUES ('$id', '$name') ON CONFLICT(id) DO UPDATE SET name = '$name' ON CONFLICT(name) DO NOTHING"
-    else
-        sql -cmd '.headers on' -cmd '.mode column' <<< "SELECT * FROM category"
-    fi
-}
+#!/bin/bash
 
 completion() {
-    local filepath=$(realpath "$0")
-    cat ${filepath%/*}/_expenses
-}
+    local cmd="${0##*/}" func="_${0##*/}"
 
-expenses() {
-    local args=$(getopt -o D:c:d:ei: -- "$@")
-    eval set -- "$args"
+    cat <<EOF
+#compdef $cmd
 
-    local delete=0 expense=0 update=0 id=$(idgen) date='now' cid amount
-    while (( $# )); do
-        case "$1" in
-            --) shift; break ;;
-            -D) shift; id="$1" delete=1 ;;
-            -c) shift; cid="$1" ;;
-            -d) shift; date=$(datetime "$1") ;;
-            -e)                expense=1 ;;
-            -i) shift; id="$1" update=1 ;;
-        esac
-        shift
-    done
-
-    if (( $delete )); then
-        has_expenses "$id"
-        sql <<< "DELETE FROM expenses WHERE id = '$id'"
-        return
-    fi
-
-    amount="$1"
-    [[ -n "$amount" ]] && (( $expense )) && amount="-$amount"
-
-    if (( $update )); then
-        has_expenses "$id"
-        local record
-        IFS='|' record=($(sql <<< "SELECT date, cid, amount FROM expenses WHERE id = '$id'"))
-        date="${date:-${record[0]}}"
-        cid="${cid:-${record[1]}}"
-        amount="${amount:-${record[2]}}"
-    fi
-
-    [[ -n "$cid" ]] && has_category "$cid"
-    [[ ! "$amount" =~ ^-?[0-9]+$ ]] && die "$amount: is not number"
-
-    local q="INSERT INTO expenses VALUES ('$id', datetime('$date'), '$cid', $amount)"
-    q="$q ON CONFLICT(id) DO UPDATE SET date = datetime('$date'), cid = '$cid', amount = $amount"
-    sql <<< "$q"
-    summary "$id"
-}
-
-export_() {
-    local n=4 fmt='%s[%s\t%s\t%d]\n' q="SELECT e.id, strftime('%Y-%m-%d', date, 'localtime'), c.name, amount FROM expenses AS e"
-    q="$q LEFT JOIN category AS c ON e.cid = c.id ORDER BY date"
-
-    case "$1" in
-        category) n=2 fmt='%s[%s]\n' q="SELECT * FROM category" ;;
-        expense ) q="${q%ORDER *} WHERE amount < 0 ORDER BY date" ;;
-        income  ) q="${q%ORDER *} WHERE amount > 0 ORDER BY date" ;;
+$func() {
+    _arguments -C '1: :->cmds' '*:: :->cmd_args'
+    case \$state in
+        cmds)
+            local -a subcmds=('completion:completion' 'expense:add expense' 'income:add income' 'delete:delete expenses' 'summary:show summary')
+            _describe -t commands 'expenses command' subcmds
+            ;;
+        cmd_args)
+            case \$words[1] in
+                expense)
+                    _arguments "-i[edit \$words[1] record]: :_${func}_expense_id" '-d[datetime]: :_${func}_datetime' '-c[category name]: :_${func}_category' ;;
+                income)
+                    _arguments "-i[edit \$words[1] record]: :_${func}_income_id" '-d[datetime]: :_${func}_datetime' '-c[category name]: :_${func}_category' ;;
+                delete)
+                    _${func}_id ;;
+                summary)
+                    _arguments '-a[show all summary]' '-e[show expense]' '-i[show income]' '-b[show balance]' ;;
+            esac
+            ;;
     esac
+}
 
-    sql -cmd '.mode csv' <<< "$q" | sed 's/,,/,-,/' | tr -d \\r | tr \\n , | xargs -rd, -n$n printf "$fmt"
+_${func}_expense_id() {
+    local q="SELECT e.id, strftime('%Y-%m-%d', date), ifnull(c.name, '-'), amount FROM expenses AS e LEFT JOIN category AS c ON e.category_id = c.id WHERE amount < 0"
+    eval set -- \$("$0" q -cmd '.mode tcl' <<< "\$q" | xargs -r -n4 printf '"%s[%s\t%s\t%d]" ')
+    _values 'expense' "\$@"
+}
+
+_${func}_income_id() {
+    local q="SELECT e.id, strftime('%Y-%m-%d', date), ifnull(c.name, '-'), amount FROM expenses AS e LEFT JOIN category AS c ON e.category_id = c.id WHERE amount > 0"
+    eval set -- \$("$0" q -cmd '.mode tcl' <<< "\$q" | xargs -r -n4 printf '"%s[%s\t%s\t%d]" ')
+    _values 'income' "\$@"
+}
+
+_${func}_datetime() {
+    _values 'date' "\$(date '+%Y-%m-%d %H:%M:%S')"
+}
+
+_${func}_category() {
+    eval set -- \$("$0" q -cmd '.mode tcl' <<< "SELECT name FROM category")
+    _values 'category' "\$@"
+}
+
+compdef $func $cmd
+EOF
+}
+
+expense() {
+    eval set -- $(argparse "$@")
+    (( ! $4 )) && die "error: amount is required" "" \
+                      "usage: ${0##*/} ${FUNCNAME[0]} [-i <expenses-id>] [-d <datetime>] [-c <category-name>] amount"
+    upsert "$1" "$2" "$3" "-$4"
+    summary "$2" "$2"
+}
+
+income() {
+    eval set -- $(argparse "$@")
+    (( ! $4 )) && die "error: amount is required" "" \
+                      "usage: ${0##*/} ${FUNCNAME[0]} [-i <expenses-id>] [-d <datetime>] [-c <category-name>] amount"
+    upsert "$1" "$2" "$3" "$4"
+    summary "$2" "$2"
+}
+
+delete() {
+    (( ! $# )) && die "error: expenses id is required" "" \
+                      "usage ${0##*/} ${FUNCNAME[0]} expenses-id..."
+    local ids=$(printf "'%s'," "$@" | sed 's/,$//')
+    sql <<< "DELETE FROM expenses WHERE id IN ($ids)"
 }
 
 summary() {
-    local args=$(getopt -o abeid: -- "$@")
+    local args=$(getopt -o aeid -- "$@")
     eval set -- "$args"
 
-    local balance=0 expense=0 income=0
     while (( $# )); do
         case "$1" in
             --) shift; break ;;
-            -a) balance=1 expense=1 income=1 ;;
-            -b) balance=1 ;;
+            -a) expense=1 income=1 balance=1 ;;
             -e) expense=1 ;;
             -i) income=1 ;;
+            -b) balance=1 ;;
         esac
         shift
     done
 
-    local filter
+    local q="SELECT e.id, strftime('%Y-%m-%d', date) AS date, c.name AS category, amount FROM expenses AS e"
+    q="$q LEFT JOIN category AS c ON e.category_id = c.id"
+
+    local f
     if (( $# )); then
-        local datetime=$(datetime "$1")
-        filter="date >= datetime('$datetime')"
-        if [[ -n "$2" ]]; then
-            datetime=$(datetime "$2")
-            filter="$filter AND date <= datetime('$datetime')"
-        fi
+        f="date >= datetime('$(datetime "$1")', 'localtime')"
+        [[ -n "$2" ]] && f="$f AND date <= datetime('$(datetime "$2")', 'localtime')"
     fi
 
-    local sqlargs=(-cmd '.headers on' -cmd '.mode column')
-
-    local q="SELECT e.id, strftime('%Y-%m-%d', date, 'localtime') AS date, c.name AS category, amount FROM expenses AS e"
-    q="$q LEFT JOIN category AS c ON e.cid = c.id"
-    [[ -n "$filter" ]] && q="$q WHERE $filter"
-    sql "${sqlargs[@]}" <<< "$q ORDER BY date ASC"; echo
+    local a=(-cmd '.headers on' -cmd '.mode column')
+    sql "${a[@]}" <<< "$q ${f:+WHERE} $f ORDER BY date ASC"; echo
 
     if (( $expense )); then
-        q="SELECT SUM(amount) AS expense FROM expenses WHERE amount < 0"
-        [[ -n "$filter" ]] && q="$q AND $filter"
-        sql "${sqlargs[@]}" <<< "$q"; echo
+        sql "${a[@]}" <<< "SELECT ifnull(SUM(amount), 0) AS expense FROM expenses WHERE amount < 0 ${f:+AND} $f"; echo
     fi
-
     if (( $income )); then
-        q="SELECT SUM(amount) AS income FROM expenses WHERE amount > 0"
-        [[ -n "$filter" ]] && q="$q AND $filter"
-        sql "${sqlargs[@]}" <<< "$q"; echo
+        sql "${a[@]}" <<< "SELECT ifnull(SUM(amount), 0) AS income FROM expenses WHERE amount > 0 ${f:+AND} $f"; echo
+    fi
+    if (( $balance )); then
+        sql "${a[@]}" <<< "SELECT ifnull(SUM(amount), 0) AS balance FROM expenses ${f:+WHERE} $f"; echo
+    fi
+}
+
+argparse() {
+    local args=$(getopt -o i:d:c: -- "$@")
+    eval set -- "$args"
+
+    local i d c
+    while (( $# )); do
+        case "$1" in
+            --) shift; break ;;
+            -i) shift; i="$1" ;;
+            -d) shift; d=$(datetime "$1") ;;
+            -c) shift; c=$(catid "$1") ;;
+        esac
+        shift
+    done
+
+    a="${1#-}"
+
+    if [[ -n "$i" ]]; then
+        local -a r
+        eval r=($(sql -cmd '.mode tcl' <<< "SELECT date, category_id, amount FROM expenses WHERE id = '$i'"))
+        d="${d:-${r[0]}}" c="${c:-${r[1]}}" a="${a:-${r[2]#-}}"
     fi
 
-    if (( $balance )); then
-        q="SELECT SUM(amount) AS balance FROM expenses"
-        [[ -n "$filter" ]] && q="$q WHERE $filter"
-        sql "${sqlargs[@]}" <<< "$q"; echo
-    fi
+    printf '"%s" "%s" "%s" "%d"' "${i:-$(idgen)}" "${d:-now}" "$c" "$a"
 }
 
 datetime() {
-    local fmt='+%Y-%m-%d %H:%M:%S'
-    if [[ "$1" =~ ^[0-9]+$ ]]; then
-        date -u -d "@$1" "$fmt"
-    else
-        date -u -d "$1 JST" "$fmt"
-    fi
+    local d="$1"
+    [[ "$1" =~ ^[0-9]+$ ]] && d="@$d"
+    date -u -d "$d" '+%Y-%m-%d %H:%M:%S'
 }
 
-die() {
-    printf '%s\n' "$@" >&2
-    exit 1
+catid() {
+    local n="$1"
+    [[ -z "$n" || "$n" == '-' ]] && return
+    local i=$(sql <<< "SELECT id FROM category WHERE name = '$n'")
+    if [[ -z "$i" ]]; then
+        i=$(idgen)
+        sql <<< "INSERT INTO category VALUES ('$i', '$n')"
+    fi
+    echo "$i"
 }
 
 has() {
@@ -161,12 +164,8 @@ has() {
     return 1
 }
 
-has_category() {
-    has category "$1" || die "$1: category not found"
-}
-
-has_expenses() {
-    has expenses "$1" || die "$1: expenses not found"
+die() {
+    printf '%s\n' "$@"; exit 1
 }
 
 idgen() {
@@ -177,43 +176,43 @@ sql() {
     cat | sqlite3 "$@" "$db"
 }
 
-expenses_home="${EXPENSES_HOME:-$HOME/.expenses}"
-install -Ddm0700 "$expenses_home"
+upsert() {
+    sql <<< "INSERT INTO expenses VALUES ('$1', datetime('$2', 'localtime'), '$3', $4) ON CONFLICT(id) DO UPDATE SET date = datetime('$2', 'localtime'), category_id = '$3', amount = $4"
+}
 
-expenses_sheet="${EXPENSES_SHEET:-default}"
+home="${EXPENSES_HOME:-$HOME/.expenses}"
+install -Ddm0700 "$home"
 
-db="$expenses_home/${expenses_sheet}.db"
+sheet="${EXPENSES_SHEET:-default}"
 
-if (( ! $(sql <<< "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'expenses'") )); then
-    sql <<EOF
-CREATE TABLE expenses (
-  id TEXT NOT NULL,
-  date TEXT NOT NULL,
-  cid TEXT,
-  amount INTEGER NOT NULL,
-  PRIMARY KEY(id)
-)
-EOF
-fi
+db="$home/${sheet}.db"
 
-if (( ! $(sql <<< "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'category'") )); then
-    sql <<EOF
-CREATE TABLE category (
+sql <<EOF
+CREATE TABLE IF NOT EXISTS category (
   id TEXT NOT NULL,
   name TEXT UNIQUE NOT NULL,
   PRIMARY KEY(id)
 )
 EOF
-fi
+
+sql <<EOF
+CREATE TABLE IF NOT EXISTS expenses (
+  id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  category_id TEXT,
+  amount INTEGER NOT NULL,
+  PRIMARY KEY(id)
+)
+EOF
 
 case "$1" in
-    category)   shift; category    "$@" ;;
-    completion) shift; completion  "$@" ;;
-    expense )   shift; expenses -e "$@" ;;
-    income  )   shift; expenses    "$@" ;;
-    'export')   shift; export_     "$@" ;;
-    backup  )   shift; sql <<< ".backup ${expenses_sheet}-backup.db" ;;
-    restore )   shift; sql <<< ".restore ${expenses_sheet}-backup.db" ;;
-    summary )   shift; summary     "$@" ;;
-    *       )          summary  -a "$@" ;;
+    completion) shift; completion "$@" ;;
+    q)          shift; sql        "$@" ;;
+    expense)    shift; expense    "$@" ;;
+    income)     shift; income     "$@" ;;
+    delete)     shift; delete     "$@" ;;
+    summary)    shift; summary    "$@" ;;
+    *)                 summary    "$@" ;;
 esac
+
+sql <<< "DELETE FROM category WHERE id NOT IN (SELECT category_id FROM expenses)"
